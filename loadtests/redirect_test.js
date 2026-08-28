@@ -1,5 +1,5 @@
 import http from "k6/http";
-import { check, sleep } from "k6";
+import { check, fail, sleep } from "k6";
 
 export const options = {
     stages: [
@@ -14,9 +14,12 @@ export const options = {
 };
 
 export default function () {
-    // Note: To test properly, replace YOUR_SHORT_CODE with a valid short code
-    // from your database, or run the locust test which seeds data first.
-    const res = http.get("http://localhost:8080/YOUR_SHORT_CODE", { redirects: 0 });
+    const shortCode = __ENV.SHORT_CODE;
+    if (!shortCode) {
+        fail("SHORT_CODE is required; run seed.py and pass its output with -e SHORT_CODE=<code>");
+    }
+
+    const res = http.get(`http://localhost:8080/${shortCode}`, { redirects: 0 });
     check(res, { "status is 302": (r) => r.status === 302 });
     sleep(0.1);
 }
