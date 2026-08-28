@@ -90,6 +90,39 @@ The easiest way to get the application running is via Docker Compose, which spin
 
 ---
 
+## Load Testing
+
+Start the Docker environment before running either load test:
+
+```bash
+docker compose up --build -d
+```
+
+### k6 Redirect Test
+
+Install [k6](https://k6.io/docs/get-started/installation/) and create a valid test URL. `seed.py` prints the generated short code:
+
+```bash
+pip install -r requirements.txt
+SHORT_CODE=$(python seed.py | tail -1)
+k6 run -e SHORT_CODE="$SHORT_CODE" loadtests/redirect_test.js
+```
+
+The k6 script sends requests to `http://localhost:8080/<short_code>` and requires `SHORT_CODE` to be set.
+
+### Locust Test
+
+Install Locust and run the test against the Docker API:
+
+```bash
+pip install locust
+locust -f loadtests/locustfile.py --host http://localhost:8080
+```
+
+Then open `http://localhost:8089` to configure and start the Locust run.
+
+---
+
 ## 📡 API Overview
 
 Once the application is running, you can access the interactive API documentation (Swagger UI) at:
@@ -108,4 +141,16 @@ Once the application is running, you can access the interactive API documentatio
 - `GET /ready` - Readiness probe (Database & Redis connection check)
 - `GET /metrics` - Prometheus metrics (Request rates, latencies, Cache hit ratio)
 
-Once running via Docker Compose, you can also view metrics in **Grafana** at `http://localhost:3001` (login: admin/admin). Add the Prometheus data source at `http://prometheus:9090` to create your own dashboards!
+---
+
+## 🛠 Accessing Integrated Components
+
+When running the application via Docker Compose, all integrated components are exposed to your local machine for easy access and monitoring:
+
+- **FastAPI Application (API & Docs):** [http://localhost:8080](http://localhost:8080) / [http://localhost:8080/docs](http://localhost:8080/docs)
+- **PostgreSQL Database:** `localhost:5433` (User: `link_forge_user`, Password: `password123`, DB: `link_forge`)
+- **Redis Cache:** `localhost:6380`
+- **Prometheus (Metrics Scraper):** [http://localhost:9090](http://localhost:9090)
+- **Grafana (Dashboards):** [http://localhost:3001](http://localhost:3001) (Default login: `admin` / `admin`)
+
+*Note: To view metrics in Grafana, add the Prometheus data source at `http://prometheus:9090` (using Docker's internal network) and create your dashboards.*
