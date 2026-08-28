@@ -10,7 +10,6 @@ from app.models.user import User
 from app.models.url import Url
 from app.auth.dependencies import get_current_user
 from app.cache.redis_client import redis_client
-from app.middleware.rate_limit import limiter
 
 router = APIRouter(prefix="/api/v1/urls", tags=["urls"])
 
@@ -27,7 +26,6 @@ def to_response(url_row) -> UrlResponse:
     )
 
 @router.post("", response_model=UrlResponse, status_code=status.HTTP_201_CREATED)
-@limiter.limit("10/minute")
 def create_url(request: Request, response: Response, payload: UrlCreateRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     try:
         url_row = create_short_url(
