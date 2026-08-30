@@ -21,10 +21,8 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Add composite index on (url_id, clicked_at) for analytics queries."""
-    op.create_index(
-        'ix_clicks_url_id_clicked_at',
-        'clicks',
-        ['url_id', 'clicked_at'],
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_clicks_url_id_clicked_at ON clicks (url_id, clicked_at)"
     )
 
 
