@@ -1,14 +1,9 @@
-import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
-from app.main import app
-from app.database.session import Base
-from app.models.click import Click
-from app.database.config import settings
+from app.cache.flush_worker import flush_once
+from app.cache.redis_client import redis_client
+from app.database.session import engine
 
-# Setup test client
+
 def test_analytics_flow(client):
     # 1. Register User 1
     client.post("/api/v1/auth/register", json={"username": "user1", "email": "user1@test.com", "password": "password123"})
@@ -39,27 +34,28 @@ def test_analytics_flow(client):
     client.get(f"/{short_code}", headers={"User-Agent": ua_chrome_desktop}, follow_redirects=False)
     client.get(f"/{short_code}", headers={"User-Agent": ua_safari_mobile}, follow_redirects=False)
     client.get(f"/{short_code}", headers={"User-Agent": ua_firefox_desktop}, follow_redirects=False)
-    
-    # Verify rows created (we check via API since it should be aggregated correctly)
-    
+
+    # Flush buffered clicks from Redis to Postgres so analytics can read them
+    flush_once(redis_client, engine)
+
     # 5. Get Analytics (User 1)
     analytics_res = client.get(f"/api/v1/urls/{url_id}/analytics", headers=headers1)
     assert analytics_res.status_code == 200
     analytics_data = analytics_res.json()
-    
+
     assert analytics_data["total_clicks"] == 3
-    
+
     # check devices
     devices = analytics_data["top_devices"]
     assert devices.get("desktop") == 2
     assert devices.get("mobile") == 1
-    
+
     # check browsers
     browsers = analytics_data["top_browsers"]
-    assert any("Chrome" in b for b in browsers.keys())
-    assert any("Safari" in b for b in browsers.keys())
-    assert any("Firefox" in b for b in browsers.keys())
-    
+    assert any("Chrome" in b for b in browsers)
+    assert any("Safari" in b for b in browsers)
+    assert any("Firefox" in b for b in browsers)
+
     print("Analytics correct!")
 
     # 6. Unauthorized access (User 2 tries to access User 1's analytics)

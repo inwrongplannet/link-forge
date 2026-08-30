@@ -3,7 +3,7 @@
 This document tracks the performance metrics achieved during our load testing iterations.
 It serves as evidence of meeting our performance goals (1000 RPS, p95 < 100ms, <1% error rate).
 
-> **Last Updated**: 2026-08-28 20:24:19
+> **Last Updated**: 2026-08-30 10:21:00
 
 ---
 
@@ -19,13 +19,14 @@ It serves as evidence of meeting our performance goals (1000 RPS, p95 < 100ms, <
 | 6 | 2026-08-28-17h07 | Locust | 500 | 8 minutes and 55 seconds | 52,624 | 45,826 | 98.3 | 85.6 | 9ms | 820ms | 36.0s | 389.5s | 87.08% | 31.1B |
 | 7 | 2026-08-28-19h49 | Locust | 500 | 1 minute and 15 seconds | 373 | 101 | 5.0 | 1.4 | 2.2s | 62.0s | 63.0s | 65.3s | 27.08% | 148.8B |
 | 8 | 2026-08-28-20h09 | Locust | 350 | 1 minute and 59 seconds | 14,463 | 14,463 | 121.3 | 121.3 | 4ms | 37ms | 170.0ms | 391.0ms | 100.00% | 0.0B |
+| 9 | 2026-08-30-10h21 | k6 | 500 | 2 minutes | 11,289 | 0 | 94.0 | 0.0 | 4.79s | 5.53s | — | 5.88s | 0.00% | — |
 
 ---
 
 ## 2. k6 Redirect Stress Tests (Redis Cache)
 
 These tests exclusively targeted the `GET /[short_code]` redirect endpoint (served from Redis cache).
-All 4 runs used 500 Virtual Users, 30s duration, no rate limiting.
+All runs used 500 Virtual Users, 30s duration, no rate limiting.
 
 | Run | RPS | p50 | p95 | p99 | Error Rate | Notes |
 | :--- | ---: | ---: | ---: | ---: | ---: | :--- |
@@ -33,6 +34,56 @@ All 4 runs used 500 Virtual Users, 30s duration, no rate limiting.
 | Run 2 | 50 | 9349.3ms | 10415.5ms | 10881.1ms | 0.00% | Uncapped Stress Test |
 | Run 3 | 49 | 9499.0ms | 10546.5ms | 11027.0ms | 0.00% | Uncapped Stress Test |
 | Run 4 | 49 | 9506.3ms | 10454.4ms | 10931.1ms | 0.00% | Uncapped Stress Test |
+| **Run 5** | **94** | **4790ms** | **5530ms** | **—** | **0.00%** | **Post RC-1 fix: Redis-buffered clicks** |
+
+### Run 5: 2026-08-30-10h21 (500 Users) — Post RC-1 Fix
+
+- **Git SHA**: `c5fd50e`
+- **Host**: `http://localhost:8080`
+- **Duration**: 2 minutes (30s ramp-up, 1m sustained, 30s ramp-down)
+- **Short Code**: `y38jwpz` (single code, all VUs target same code)
+
+#### Configuration
+
+| Parameter | Value |
+|---|---|
+| VUs | 500 |
+| Ramp-up | 30s → 500 |
+| Sustain | 1m at 500 |
+| Ramp-down | 30s → 0 |
+| Sleep between requests | 100ms |
+| Threshold: p95 | < 100ms |
+| Threshold: error rate | < 1% |
+
+#### Results
+
+| Metric | Value | Threshold | Status |
+|---|---|---|---|
+| Total requests | 11,289 | — | — |
+| RPS (avg) | 94.0 | — | — |
+| Error rate | 0.00% | < 1% | PASS |
+| p50 | 4,790ms | — | — |
+| p95 | 5,530ms | < 100ms | FAIL |
+| Max | 5,880ms | — | — |
+
+#### Analysis
+
+**What improved (RC-1 fix):**
+- RPS increased from ~50 → 94 (**+88% throughput**)
+- p50 decreased from 9,300ms → 4,790ms (**-48% latency**)
+- p95 decreased from 10,500ms → 5,530ms (**-47% latency**)
+- 0% error rate maintained
+
+**Why p95 is still above 100ms:**
+The redirect hot path now touches only Redis (no Postgres writes), but the **synchronous concurrency model** (RC-2) remains the bottleneck:
+- Each request occupies one of AnyIO's **40 default threadpool threads** for its entire duration (Redis INCR + RPUSH + UA parsing + JSON serialization)
+- 500 VUs competing for 40 threads → queueing at the threadpool level
+- The sync Redis client (`redis-py`) blocks the thread on each call
+
+**Remaining bottlenecks (in priority order):**
+1. **RC-2**: Sync routes + 40-thread ceiling (convert to `async def` + async Redis)
+2. **RC-3**: bcrypt cost on auth routes (not relevant to this redirect-only test)
+3. **RC-4**: Default DB pool (not relevant to this redirect-only test)
 
 ---
 
@@ -367,3 +418,8 @@ All 4 runs used 500 Virtual Users, 30s duration, no rate limiting.
 ## 4. Performance Tuning Log
 
 *Document any changes made to the infrastructure, database indexes, or application code here to see how they impact the metrics in the table above.*
+
+| Date | Change | Files | Expected Impact |
+|---|---|---|---|
+| 2026-08-30 | **RC-1 fix: Redis-buffered click counting with background flush** — Removed synchronous DB writes (UPDATE urls + INSERT clicks + COMMIT) from the redirect hot path. Clicks are now buffered in Redis via `INCR` + `RPUSH` and flushed to Postgres in batches every 10s by a background worker. Also added: `expires_at` in cache payload (bug fix), negative caching for unknown codes. | `app/cache/click_buffer.py` (new), `app/cache/flush_worker.py` (new), `app/cache/metrics.py`, `app/api/redirect.py`, `app/main.py` | Redirect hot path touches only Redis on cache hit → sub-millisecond, no row-lock contention. Expected throughput: 1,000+ RPS (up from ~50 RPS). Postgres writes shrink from 2-per-request to 1 batch-per-10s. |
+| 2026-08-30 | **k6 validation (Run 5)** — 500 VUs, 2 min, single short code. RPS: 50→94 (+88%), p50: 9.3s→4.8s (-48%), p95: 10.5s→5.5s (-47%), 0% errors. p95 still above 100ms threshold because sync concurrency model (RC-2, 40 threads) remains the bottleneck. | — | RC-1 fix validated. Next: RC-2 (async routes + async Redis) to remove threadpool ceiling. |

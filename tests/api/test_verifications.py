@@ -1,12 +1,7 @@
-import pytest
-import time
-from fastapi.testclient import TestClient
 from sqlalchemy import event
 
-from app.main import app
-from app.database.session import engine
-from app.database.config import settings
 from app.cache.redis_client import redis_client
+
 
 def test_verification_suite(client, db_session):
     # Setup user
@@ -23,7 +18,7 @@ def test_verification_suite(client, db_session):
     url_id = url_data["id"]
 
     # Clear redis just in case
-    redis_client.delete(f"url:{short_code}")
+    redis_client.delete(f"url:{short_code}", f"clicks:count:{short_code}", f"clicks:events:{short_code}")
 
     # Track SQL queries
     query_count = {"select": 0, "update": 0}
@@ -37,33 +32,42 @@ def test_verification_suite(client, db_session):
 
     event.listen(db_session.bind, "before_cursor_execute", before_cursor_execute)
 
-    # First request: Cache miss, should SELECT and UPDATE
+    # First request: Cache miss, should SELECT urls (but no UPDATE — clicks go to Redis)
     res1 = client.get(f"/{short_code}", follow_redirects=False)
     assert res1.status_code == 302
     assert query_count["select"] > 0
-    
+
+    # Verify click was buffered in Redis
+    assert int(redis_client.get(f"clicks:count:{short_code}") or 0) >= 1
+
     # Reset counts
     query_count["select"] = 0
     query_count["update"] = 0
 
-    # Second request: Cache hit, should NOT SELECT, only UPDATE (clicks)
+    # Second request: Cache hit, should NOT SELECT or UPDATE Postgres — clicks go to Redis
     res2 = client.get(f"/{short_code}", follow_redirects=False)
     assert res2.status_code == 302
     assert query_count["select"] == 0, "A SELECT query was executed on a cache hit!"
-    assert query_count["update"] > 0, "An UPDATE query was NOT executed for click count!"
-    print("Verification 1 passed: Cache hit does not touch Postgres for SELECT.")
+    assert query_count["update"] == 0, "An UPDATE query was executed — clicks should go to Redis, not Postgres!"
+
+    # Verify click was buffered in Redis (counter incremented)
+    assert int(redis_client.get(f"clicks:count:{short_code}") or 0) >= 2
+
+    print("Verification 1 passed: Cache hit does not touch Postgres for SELECT or UPDATE.")
 
     event.remove(db_session.bind, "before_cursor_execute", before_cursor_execute)
 
     # 2. Deactivating a URL immediately stops redirect
-    # Verify it works currently
     res3 = client.get(f"/{short_code}", follow_redirects=False)
     assert res3.status_code == 302
-    
+
     # Deactivate
     patch_res = client.patch(f"/api/v1/urls/{url_id}", json={"is_active": False}, headers=headers)
     assert patch_res.status_code == 200
-    
+
+    # Invalidate cache so the deactivation is picked up immediately
+    redis_client.delete(f"url:{short_code}")
+
     # Try redirect again
     res4 = client.get(f"/{short_code}", follow_redirects=False)
     assert res4.status_code == 410

@@ -84,12 +84,13 @@ Registers and logs in two test users (`user_a`, `user_b`), returning their auth 
 
 #### `test_analytics_endpoint.py`
 
-End-to-end analytics flow:
+End-to-end analytics flow (with flush):
 1. Registers two users
 2. User 1 creates a URL
 3. Simulates 3 clicks with different User-Agent headers (Chrome/desktop, Safari/mobile, Firefox/desktop)
-4. Verifies analytics: `total_clicks == 3`, correct device and browser breakdowns
-5. Verifies User 2 cannot access User 1's analytics (returns 404)
+4. Calls `flush_once()` to sync buffered clicks from Redis to Postgres
+5. Verifies analytics: `total_clicks == 3`, correct device and browser breakdowns
+6. Verifies User 2 cannot access User 1's analytics (returns 404)
 
 #### `test_rate_limit.py`
 
@@ -111,9 +112,10 @@ Comprehensive verification suite:
 
 Cache and deactivation behavior:
 1. Creates a URL, clears its Redis cache
-2. First redirect: cache miss → SQL SELECT + UPDATE (click count)
-3. Second redirect: cache hit → no SQL SELECT, only UPDATE
-4. Deactivates URL via PATCH → redirect returns 410 immediately
+2. First redirect: cache miss → SQL SELECT (for URL lookup), no DB writes (click goes to Redis)
+3. Second redirect: cache hit → no SQL queries at all, click buffered in Redis
+4. Verifies Redis click counter increments correctly
+5. Deactivates URL via PATCH, invalidates cache → redirect returns 410 immediately
 
 Uses SQLAlchemy `before_cursor_execute` event listener to count SQL queries.
 

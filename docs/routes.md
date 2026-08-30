@@ -204,10 +204,11 @@ Redirect to the original URL. This is the public-facing endpoint — **no authen
 | `410 Gone` | URL has been deactivated or has expired. |
 
 **Side Effects:**
-- Increments `click_count` on the `urls` table (atomic SQL update).
-- Records a `Click` row with IP, browser, device, and referrer.
-- On first access: caches URL data in Redis with 300s TTL.
+- Buffers click data in Redis (INCR counter + RPUSH event details) — no synchronous DB writes.
+- On first access: caches URL data in Redis with 300s TTL (includes `expires_at`).
 - On subsequent access: serves from Redis cache (skips DB SELECT).
+- Unknown short codes are cached for 60s (`__miss__` sentinel) to prevent DB stampedes.
+- A background flush worker batch-writes buffered clicks to Postgres every 10 seconds.
 
 ---
 
@@ -271,4 +272,5 @@ Prometheus-compatible metrics endpoint. Exposed automatically by `prometheus-fas
 
 Includes:
 - HTTP request count, latency histograms (by method, path, status)
-- Custom counters: `linkforge_cache_hits_total`, `linkforge_cache_misses_total`
+- Custom counters: `linkforge_cache_hits_total`, `linkforge_cache_misses_total`, `linkforge_clicks_buffered_total`, `linkforge_clicks_flushed_total`, `linkforge_flush_cycles_total`, `linkforge_flush_errors_total`
+- Histogram: `linkforge_redirect_duration_seconds`

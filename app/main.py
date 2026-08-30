@@ -1,11 +1,13 @@
-from contextlib import asynccontextmanager
 import logging
+import threading
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 
-from app.api import urls, redirect, auth, analytics, health
+from app.api import analytics, auth, health, redirect, urls
+from app.cache.flush_worker import run_flush_worker
 from app.database.bootstrap import initialize_database
 from app.middleware.error_handlers import register_exception_handlers
 from app.utils.logging import configure_logging
@@ -13,10 +15,30 @@ from app.utils.logging import configure_logging
 configure_logging()
 logger = logging.getLogger("linkforge")
 
+_flush_stop_event = threading.Event()
+_flush_thread: threading.Thread | None = None
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    global _flush_thread
     initialize_database()
+
+    _flush_thread = threading.Thread(
+        target=run_flush_worker,
+        kwargs={"stop_event": _flush_stop_event},
+        daemon=True,
+        name="click-flush-worker",
+    )
+    _flush_thread.start()
+    logger.info("Click flush worker thread started")
+
     yield
+
+    _flush_stop_event.set()
+    if _flush_thread:
+        _flush_thread.join(timeout=15)
+    logger.info("Click flush worker thread stopped")
 
 
 def create_app() -> FastAPI:

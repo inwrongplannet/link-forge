@@ -57,7 +57,7 @@ Uses the `user-agents` library to parse the `User-Agent` header:
 - **Browser:** Extracted as `"{family} {version}"` (e.g., `"Chrome 91.0.4472"`)
 - **Device:** Classified as one of: `mobile`, `tablet`, `desktop`, `other`
 
-### `service.py` — Click Recording
+### `service.py` — Click Recording (fallback)
 
 **`record_click(db, url_id, request)`**
 
@@ -68,7 +68,7 @@ Creates a `Click` row capturing:
 - `device` — Parsed from User-Agent
 - `referrer` — From the `Referer` header
 
-> Note: The click is added to the session but **not committed** — the caller (redirect handler) commits the transaction to batch the click insert with the click count update.
+> Note: This function is now only used as a **fallback** when Redis is unavailable. The primary click-recording path uses `buffer_click()` (see Caching below), which buffers click data in Redis for batch flushing to Postgres.
 
 ---
 
@@ -78,11 +78,48 @@ Creates a `Click` row capturing:
 
 Singleton Redis client created from `settings.redis_url` with `decode_responses=True` (returns strings instead of bytes).
 
+### `click_buffer.py` — Redis-Buffered Click Recording
+
+The primary click-recording mechanism for the redirect hot path. Instead of writing to Postgres on every redirect, click data is buffered in Redis and flushed to Postgres in batches by a background worker.
+
+**`buffer_click(r, short_code, url_id, ip_address, browser, device, referrer, clicked_at)`**
+
+Buffers a click event in Redis using a pipeline:
+- `INCR clicks:count:{short_code}` — atomic click counter
+- `RPUSH clicks:events:{short_code}` — JSON-encoded event details (url_id, ip, browser, device, referrer, timestamp)
+- Returns `True` on success, `False` if Redis is unavailable (caller falls back to synchronous DB writes)
+
+**`drain_click_buffer(r, short_code) -> (delta, events)`**
+
+Atomically reads and clears buffered click data for a short code. Used by the flush worker.
+
+### `flush_worker.py` — Background Click Flush
+
+Periodically drains buffered click data from Redis and writes to Postgres in batches.
+
+**`flush_once(r, engine) -> int`**
+
+Runs a single flush cycle:
+1. SCANs Redis for `clicks:count:*` keys
+2. Atomically drains each counter + event list
+3. Batch UPDATEs `urls.click_count`
+4. Batch INSERTs `clicks` rows
+5. Returns the number of events flushed
+
+**`run_flush_worker(r, engine, interval, stop_event)`**
+
+Background loop that runs `flush_once()` every `interval` seconds (default: 10s). Runs in a daemon thread started by the FastAPI lifespan. Uses `threading.Event` for graceful shutdown.
+
 ### `metrics.py`
 
-Prometheus counters for cache observability:
-- **`linkforge_cache_hits_total`** — Incremented when a redirect is served from Redis
-- **`linkforge_cache_misses_total`** — Incremented when a redirect falls through to PostgreSQL
+Prometheus counters for cache and click-buffer observability:
+- **`linkforge_cache_hits_total`** — Redirects served from Redis cache
+- **`linkforge_cache_misses_total`** — Redirects that fell through to PostgreSQL
+- **`linkforge_clicks_buffered_total`** — Click events buffered in Redis
+- **`linkforge_clicks_flushed_total`** — Click events flushed to Postgres
+- **`linkforge_flush_cycles_total`** — Flush worker cycles completed
+- **`linkforge_flush_errors_total`** — Flush worker cycles that failed
+- **`linkforge_redirect_duration_seconds`** — Redirect request latency histogram
 
 ---
 
