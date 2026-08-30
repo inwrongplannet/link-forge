@@ -9,6 +9,8 @@ from prometheus_fastapi_instrumentator import Instrumentator
 from app.api import analytics, auth, health, redirect, urls
 from app.cache.flush_worker import run_flush_worker_async
 from app.database.bootstrap import initialize_database
+from app.database.config import settings
+from app.middleware.concurrency import ConcurrencyLimiterMiddleware
 from app.middleware.error_handlers import register_exception_handlers
 from app.utils.logging import configure_logging
 
@@ -49,6 +51,12 @@ async def lifespan(_: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(title="Link Forge", version="0.1.0", lifespan=lifespan)
     Instrumentator().instrument(app).expose(app, endpoint="/metrics")
+
+    app.add_middleware(
+        ConcurrencyLimiterMiddleware,
+        max_concurrent=settings.max_concurrent_requests,
+        timeout=settings.concurrency_timeout,
+    )
 
     app.include_router(health.router)
     app.include_router(urls.router)

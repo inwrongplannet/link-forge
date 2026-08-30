@@ -123,7 +123,14 @@ def run_flush_worker(
     if r is None:
         r = redis.Redis.from_url(settings.redis_url, decode_responses=True)
     if engine is None:
-        engine = create_engine(settings.database_url, pool_pre_ping=True)
+        engine = create_engine(
+            settings.database_url,
+            pool_pre_ping=True,
+            pool_size=2,
+            max_overflow=2,
+            pool_timeout=settings.pool_timeout,
+            pool_recycle=settings.pool_recycle,
+        )
     if stop_event is None:
         stop_event = threading.Event()
 
@@ -156,7 +163,14 @@ async def run_flush_worker_async(
     for the actual batch operations (acceptable for background batch work).
     """
     r = redis.Redis.from_url(settings.redis_url, decode_responses=True)
-    engine = create_engine(settings.database_url, pool_pre_ping=True)
+    engine = create_engine(
+        settings.database_url,
+        pool_pre_ping=True,
+        pool_size=2,
+        max_overflow=2,
+        pool_timeout=settings.pool_timeout,
+        pool_recycle=settings.pool_recycle,
+    )
     if stop_event is None:
         stop_event = asyncio.Event()
 

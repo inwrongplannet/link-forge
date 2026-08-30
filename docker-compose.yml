@@ -14,9 +14,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
-    # Run migrations before starting the application
-    command: >
-      bash -c "alembic upgrade head || alembic stamp head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4"
+    # Migrations run via Dockerfile CMD (alembic upgrade head)
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
 
   db:
     image: postgres:15
@@ -26,6 +25,14 @@ services:
       - POSTGRES_DB=link_forge
     ports:
       - "5433:5432"
+    command:
+      - postgres
+      - -c
+      - max_connections=160
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U link_forge_user -d link_forge"]
       interval: 5s
@@ -33,6 +40,7 @@ services:
       retries: 5
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d
 
   redis:
     image: redis:7-alpine
