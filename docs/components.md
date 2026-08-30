@@ -8,12 +8,12 @@ This document details every module and component in the Link Forge application.
 
 ### `dependencies.py` — FastAPI Auth Dependency
 
-Provides `get_current_user()`, a FastAPI `Depends` callable used to protect routes:
+Provides `get_current_user()`, an **async** FastAPI `Depends` callable used to protect routes:
 
 1. Extracts the Bearer token from the `Authorization` header via `HTTPBearer()`
 2. Decodes the JWT using `decode_token()`
 3. Validates the token type is `"access"` (rejects refresh tokens)
-4. Looks up the user by `claims["sub"]` (user UUID)
+4. Looks up the user by `claims["sub"]` (user UUID) using `get_async_db()` and `AsyncSession`
 5. Raises `401 Unauthorized` if the token is invalid/expired or the user no longer exists
 
 ### `jwt.py` — JWT Token Management
@@ -36,8 +36,11 @@ Provides `get_current_user()`, a FastAPI `Depends` callable used to protect rout
 
 ### `url_service.py` — URL Creation Logic
 
-**`create_short_url(db, original_url, user_id, custom_alias, expires_at)`**
+**`create_short_url(db, original_url, user_id, custom_alias, expires_at)`** — sync version for background tasks.
 
+**`create_short_url_async(db, original_url, user_id, custom_alias, expires_at)`** — async version for route handlers. Uses `AsyncSession` with `await db.execute()`.
+
+Both:
 1. Validates the URL format (must have `http` or `https` scheme and a netloc)
 2. Uses the `custom_alias` if provided, otherwise generates a random 7-char code
 3. Attempts to insert the URL row; on `IntegrityError` (duplicate short code):
@@ -57,7 +60,7 @@ Uses the `user-agents` library to parse the `User-Agent` header:
 - **Browser:** Extracted as `"{family} {version}"` (e.g., `"Chrome 91.0.4472"`)
 - **Device:** Classified as one of: `mobile`, `tablet`, `desktop`, `other`
 
-### `service.py` — Click Recording
+### `service.py` — Click Recording (fallback)
 
 **`record_click(db, url_id, request)`**
 
@@ -68,7 +71,7 @@ Creates a `Click` row capturing:
 - `device` — Parsed from User-Agent
 - `referrer` — From the `Referer` header
 
-> Note: The click is added to the session but **not committed** — the caller (redirect handler) commits the transaction to batch the click insert with the click count update.
+> Note: This function is now only used as a **fallback** when Redis is unavailable. The primary click-recording path uses `buffer_click()` (see Caching below), which buffers click data in Redis for batch flushing to Postgres.
 
 ---
 
@@ -76,13 +79,60 @@ Creates a `Click` row capturing:
 
 ### `redis_client.py`
 
-Singleton Redis client created from `settings.redis_url` with `decode_responses=True` (returns strings instead of bytes).
+Two Redis clients are provided as module-level singletons created from `settings.redis_url` with `decode_responses=True`:
+- **`redis_client`** — `redis.Redis` (sync), used by background flush worker and cache invalidation
+- **`async_redis_client`** — `redis.asyncio.Redis` (async), used by async route handlers for non-blocking I/O
+
+### `click_buffer.py` — Redis-Buffered Click Recording
+
+The primary click-recording mechanism for the redirect hot path. Instead of writing to Postgres on every redirect, click data is buffered in Redis and flushed to Postgres in batches by a background worker.
+
+**`buffer_click(r, short_code, url_id, ip_address, browser, device, referrer, clicked_at)`**
+
+Buffers a click event in Redis using a pipeline:
+- `INCR clicks:count:{short_code}` — atomic click counter
+- `RPUSH clicks:events:{short_code}` — JSON-encoded event details (url_id, ip, browser, device, referrer, timestamp)
+- Returns `True` on success, `False` if Redis is unavailable (caller falls back to synchronous DB writes)
+
+**`buffer_click_async(short_code, url_id, ip_address, browser, device, referrer, clicked_at)`**
+
+Async wrapper that takes the module-level `async_redis_client` and calls the same pipeline logic with `await`.
+
+**`drain_click_buffer(r, short_code) -> (delta, events)`**
+
+Atomically reads and clears buffered click data for a short code. Used by the flush worker.
+
+### `flush_worker.py` — Background Click Flush
+
+Periodically drains buffered click data from Redis and writes to Postgres in batches.
+
+**`flush_once(r, engine) -> int`**
+
+Runs a single flush cycle:
+1. SCANs Redis for `clicks:count:*` keys
+2. Atomically drains each counter + event list
+3. Batch UPDATEs `urls.click_count`
+4. Batch INSERTs `clicks` rows
+5. Returns the number of events flushed
+
+**`run_flush_worker(r, engine, interval, stop_event)`**
+
+Background loop that runs `flush_once()` every `interval` seconds (default: 10s). Runs in a daemon thread started by the FastAPI lifespan. Uses `threading.Event` for graceful shutdown.
+
+**`run_flush_worker_async(r, engine, interval, stop_event)`**
+
+Async variant that runs `flush_once()` in an `asyncio` loop using `asyncio.sleep()` and `asyncio.Event`. Launched via `asyncio.create_task` in the app lifespan — runs as a background coroutine, not a thread.
 
 ### `metrics.py`
 
-Prometheus counters for cache observability:
-- **`linkforge_cache_hits_total`** — Incremented when a redirect is served from Redis
-- **`linkforge_cache_misses_total`** — Incremented when a redirect falls through to PostgreSQL
+Prometheus counters for cache and click-buffer observability:
+- **`linkforge_cache_hits_total`** — Redirects served from Redis cache
+- **`linkforge_cache_misses_total`** — Redirects that fell through to PostgreSQL
+- **`linkforge_clicks_buffered_total`** — Click events buffered in Redis
+- **`linkforge_clicks_flushed_total`** — Click events flushed to Postgres
+- **`linkforge_flush_cycles_total`** — Flush worker cycles completed
+- **`linkforge_flush_errors_total`** — Flush worker cycles that failed
+- **`linkforge_redirect_duration_seconds`** — Redirect request latency histogram
 
 ---
 

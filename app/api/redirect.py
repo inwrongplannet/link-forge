@@ -1,52 +1,96 @@
 import json
 from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
-from sqlalchemy.orm import Session
-from sqlalchemy import select, update
-from app.database.session import get_db
-from app.models.url import Url
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.analytics.parser import extract_browser_and_device
 from app.analytics.service import record_click
-from app.cache.redis_client import redis_client
-from app.cache.metrics import cache_hits, cache_misses
+from app.cache.click_buffer import buffer_click_async
+from app.cache.metrics import cache_hits, cache_misses, clicks_buffered
+import app.cache.redis_client as redis_module
+from app.database.session import get_async_db
+from app.models.url import Url
 
 CACHE_TTL_SECONDS = 300
+NEGATIVE_CACHE_TTL_SECONDS = 60
+MISS_SENTINEL = "__miss__"
+
 router = APIRouter(tags=["redirect"])
 
+
 @router.get("/{short_code}")
-def redirect_to_original(short_code: str, request: Request, db: Session = Depends(get_db)):
+async def redirect_to_original(short_code: str, request: Request, db: AsyncSession = Depends(get_async_db)):  # noqa: B008
     cache_key = f"url:{short_code}"
-    cached = redis_client.get(cache_key)
-    
+    cached = await redis_module.async_redis_client.get(cache_key)
+
     if cached:
         cache_hits.inc()
+
+        if cached == MISS_SENTINEL:
+            raise HTTPException(status_code=404, detail="Short URL not found")
+
         data = json.loads(cached)
+
         if data["is_active"] is False:
             raise HTTPException(status_code=410, detail="This link has been deactivated")
-            
-        # cache-only fast path (keeping click writes synchronous for now)
-        db.execute(update(Url).where(Url.id == data["id"]).values(click_count=Url.click_count + 1))
-        record_click(db, data["id"], request)
-        db.commit()
+
+        if data.get("expires_at"):
+            expires_at = datetime.fromisoformat(data["expires_at"])
+            if expires_at < datetime.now(timezone.utc):
+                raise HTTPException(status_code=410, detail="This link has expired")
+
+        browser, device = extract_browser_and_device(request.headers.get("user-agent", ""))
+        buffered = await buffer_click_async(
+            redis_module.async_redis_client,
+            short_code,
+            data["id"],
+            ip_address=request.client.host if request.client else None,
+            browser=browser,
+            device=device,
+            referrer=request.headers.get("referer"),
+        )
+        if buffered:
+            clicks_buffered.inc()
+
         return RedirectResponse(url=data["original_url"], status_code=302)
-        
+
     cache_misses.inc()
-    url_row = db.scalar(select(Url).where(Url.short_code == short_code))
+    result = await db.execute(select(Url).where(Url.short_code == short_code))
+    url_row = result.scalar_one_or_none()
     if url_row is None:
+        await redis_module.async_redis_client.setex(cache_key, NEGATIVE_CACHE_TTL_SECONDS, MISS_SENTINEL)
         raise HTTPException(status_code=404, detail="Short URL not found")
     if not url_row.is_active:
         raise HTTPException(status_code=410, detail="This link has been deactivated")
     if url_row.expires_at and url_row.expires_at < datetime.now(timezone.utc):
         raise HTTPException(status_code=410, detail="This link has expired")
-        
-    redis_client.setex(cache_key, CACHE_TTL_SECONDS, json.dumps({
+
+    cache_payload = {
         "id": str(url_row.id),
         "original_url": url_row.original_url,
         "is_active": url_row.is_active,
-    }))
-    
-    db.execute(update(Url).where(Url.id == url_row.id).values(click_count=Url.click_count + 1))
-    record_click(db, url_row.id, request)
-    db.commit()
-    
+        "expires_at": url_row.expires_at.isoformat() if url_row.expires_at else None,
+    }
+    await redis_module.async_redis_client.setex(cache_key, CACHE_TTL_SECONDS, json.dumps(cache_payload))
+
+    browser, device = extract_browser_and_device(request.headers.get("user-agent", ""))
+    buffered = await buffer_click_async(
+        redis_module.async_redis_client,
+        short_code,
+        str(url_row.id),
+        ip_address=request.client.host if request.client else None,
+        browser=browser,
+        device=device,
+        referrer=request.headers.get("referer"),
+    )
+    if buffered:
+        clicks_buffered.inc()
+
+    if not buffered:
+        record_click(db, url_row.id, request)
+        await db.commit()
+
     return RedirectResponse(url=url_row.original_url, status_code=302)

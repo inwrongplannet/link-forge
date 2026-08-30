@@ -64,17 +64,25 @@ Provides a SQLAlchemy session wrapped in a **transaction that is rolled back** a
 4. Yields the session to the test
 5. Closes the session, rolls back the transaction, closes the connection
 
+### `get_async_db` override (autouse)
+
+Overrides the `get_async_db` FastAPI dependency to yield a sync-backed `AsyncSession` using the transactional `db_session` fixture. This allows async route handlers to run against the same rolled-back transaction as sync tests.
+
+### `reset_async_redis` (autouse)
+
+Clears all keys in the Redis test database between tests. Uses `async_redis_client.flushdb()` to ensure test isolation for Redis-dependent tests.
+
 ### `reset_rate_limit` (autouse)
 
 Disables the SlowAPI rate limiter for all tests (prevents `429` errors), re-enables after each test.
 
 ### `client`
 
-Returns a `TestClient` that uses the transactional `db_session` instead of the real database session. Overrides `get_db` dependency.
+Returns a `TestClient` that uses the transactional `db_session` instead of the real database session. Overrides `get_db` and `get_async_db` dependencies.
 
 ### `auth_headers_for_two_users`
 
-Registers and logs in two test users (`user_a`, `user_b`), returning their auth headers as a tuple. Useful for testing ownership/authorization logic.
+Registers and logs in two test users with **unique usernames** (generated via `uuid.uuid4().hex[:8]`), returning their auth headers as a tuple. Useful for testing ownership/authorization logic. Unique usernames prevent `409 Conflict` across test runs.
 
 ---
 
@@ -84,12 +92,13 @@ Registers and logs in two test users (`user_a`, `user_b`), returning their auth 
 
 #### `test_analytics_endpoint.py`
 
-End-to-end analytics flow:
+End-to-end analytics flow (with flush):
 1. Registers two users
 2. User 1 creates a URL
 3. Simulates 3 clicks with different User-Agent headers (Chrome/desktop, Safari/mobile, Firefox/desktop)
-4. Verifies analytics: `total_clicks == 3`, correct device and browser breakdowns
-5. Verifies User 2 cannot access User 1's analytics (returns 404)
+4. Calls `flush_once()` to sync buffered clicks from Redis to Postgres
+5. Verifies analytics: `total_clicks == 3`, correct device and browser breakdowns
+6. Verifies User 2 cannot access User 1's analytics (returns 404)
 
 #### `test_rate_limit.py`
 
@@ -111,9 +120,10 @@ Comprehensive verification suite:
 
 Cache and deactivation behavior:
 1. Creates a URL, clears its Redis cache
-2. First redirect: cache miss → SQL SELECT + UPDATE (click count)
-3. Second redirect: cache hit → no SQL SELECT, only UPDATE
-4. Deactivates URL via PATCH → redirect returns 410 immediately
+2. First redirect: cache miss → SQL SELECT (for URL lookup), no DB writes (click goes to Redis)
+3. Second redirect: cache hit → no SQL queries at all, click buffered in Redis
+4. Verifies Redis click counter increments correctly
+5. Deactivates URL via PATCH, invalidates cache → redirect returns 410 immediately
 
 Uses SQLAlchemy `before_cursor_execute` event listener to count SQL queries.
 

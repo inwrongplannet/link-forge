@@ -96,3 +96,15 @@ alembic upgrade head --sql
 3. **Test downgrade paths** — ensure every migration can be reversed cleanly.
 4. **Keep migrations atomic** — each migration should represent one logical change.
 5. **Set `DATABASE_URL`** environment variable before running Alembic commands (the `env.py` reads it via `settings`).
+
+## Docker Compose Startup
+
+When running via Docker Compose, the application container automatically applies migrations before starting uvicorn:
+
+```bash
+alembic upgrade head || alembic stamp head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+```
+
+- `alembic upgrade head` — applies any pending migrations
+- `alembic stamp head` — fallback if the migration history is already current (stamps the version table without running operations)
+- This ensures the schema is always up to date without requiring a separate init container

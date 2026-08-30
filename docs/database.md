@@ -26,8 +26,8 @@ Settings are loaded from environment variables and `.env` file (via `SettingsCon
 
 | Variable | Description | Default |
 |---|---|---|
-| `DATABASE_URL` | PostgreSQL connection string | `postgresql+psycopg://abhishek:user1234@127.0.0.1:5432/link_forge` |
-| `REDIS_URL` | Redis connection string | `redis://localhost:6379/0` |
+| `DATABASE_URL` | PostgreSQL connection string | `postgresql+psycopg://link_forge_user:password123@127.0.0.1:5433/link_forge` |
+| `REDIS_URL` | Redis connection string | `redis://localhost:6380/0` |
 | `RATE_LIMIT_PER_MINUTE` | Global rate limit | `60` |
 | `BASE_URL` | Public base URL for short links | `http://localhost:8000` |
 | `JWT_SECRET_KEY` | Secret key for JWT signing | `supersecretkey_please_change_in_production` |
@@ -40,17 +40,24 @@ Settings are loaded from environment variables and `.env` file (via `SettingsCon
 Defined in `app/database/session.py`:
 
 ```python
+# Sync engine — used by flush worker, bootstrap, and test fixtures
 engine = create_engine(DATABASE_URL, future=True, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# Async engine — used by async route handlers via greenlet-based AsyncSession
+async_engine = create_async_engine(AsyncDATABASE_URL, future=True, pool_pre_ping=True)
+AsyncSessionLocal = sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
 ```
 
+- **Sync `engine`**: Direct psycopg3 driver. Used by the flush worker and Alembic migrations.
+- **Async `async_engine`**: Uses `sqlalchemy.ext.asyncio` with psycopg3 via a greenlet shim. Non-blocking I/O for async route handlers.
 - **`pool_pre_ping=True`**: Validates connections before use, recovering from stale connections.
 - **`future=True`**: Uses SQLAlchemy 2.0-style engine.
 - **`autocommit=False, autoflush=False`**: Explicit transaction control.
 
 ### Dependency Injection
 
-The `get_db()` generator is used as a FastAPI dependency to provide scoped sessions:
+The `get_db()` generator is used as a FastAPI dependency to provide scoped sessions for sync code paths (flush worker, health checks):
 
 ```python
 def get_db() -> Generator[Session, None, None]:
@@ -60,6 +67,19 @@ def get_db() -> Generator[Session, None, None]:
     finally:
         db.close()
 ```
+
+The `get_async_db()` async generator is the primary dependency for async route handlers:
+
+```python
+async def get_async_db() -> AsyncGenerator[AsyncSession, None]:
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+        finally:
+            await session.close()
+```
+
+Override `get_async_db` in tests to provide a sync-backed `AsyncSession` that uses the transactional `db_session` fixture.
 
 ## Schema Bootstrap
 
@@ -144,7 +164,9 @@ Relationships:
 
 Redis is used as a **cache-aside** store for redirect lookups.
 
-- **Client:** `app/cache/redis_client.py` — singleton `redis.Redis` instance from `settings.redis_url`
+- **Client:** `app/cache/redis_client.py` — two singleton instances:
+  - `redis_client` — `redis.Redis` (sync), used by flush worker and cache invalidation
+  - `async_redis_client` — `redis.asyncio.Redis` (async), used by async route handlers
 - **Key format:** `url:{short_code}`
 - **Value:** JSON string `{"id": "...", "original_url": "...", "is_active": true/false}`
 - **TTL:** 300 seconds (5 minutes)

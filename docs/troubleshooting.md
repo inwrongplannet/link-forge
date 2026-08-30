@@ -157,7 +157,42 @@ limiter.enabled = False
 
 **Cause:** Tests are not properly rolling back transactions.
 
-**Fix:** Always use the `client` and `db_session` fixtures from `conftest.py`. The `db_session` fixture wraps each test in a transaction that is rolled back after the test completes.
+**Fix:** Always use the `client` and `db_session` fixtures from `conftest.py`. The `db_session` fixture wraps each test in a transaction that is rolled back after the test completes. The `get_async_db` override ensures async route handlers use the same rolled-back session.
+
+---
+
+## Async & Worker Issues
+
+### `RuntimeError: asyncio is already running`
+
+**Cause:** Trying to call `asyncio.run()` or start a new event loop inside an already-running loop.
+
+**Fix:** This typically happens when mixing sync and async Redis clients. Always use `async_redis_client` (from `app/cache/redis_client.py`) in async route handlers and the sync `redis_client` in background tasks or scripts.
+
+### Tests: `No async session override found`
+
+**Cause:** The `get_async_db` override fixture is not being applied.
+
+**Fix:** Ensure the `get_async_db` fixture in `conftest.py` has `autouse=True` and is at the correct scope. The fixture must yield an `AsyncSession` backed by the sync `db_session` transaction.
+
+### Multiple flush workers running simultaneously
+
+**Cause:** Each uvicorn worker starts its own `asyncio.create_task` for the flush worker. With `--workers 4`, four flush workers run concurrently.
+
+**Fix:** This is expected behavior — each worker drains its own portion of the Redis buffer. The `drain_click_buffer` function uses atomic Redis operations (`LLEN` + `LPOP`) so concurrent workers won't double-count events.
+
+### `Connection pool exhausted` with multiple workers
+
+**Cause:** Each worker creates its own connection pool; with 4 workers and default pool size of 5, you may exhaust connections under load.
+
+**Fix:** Increase the pool size in `app/database/session.py` or reduce the number of workers:
+```python
+async_engine = create_async_engine(
+    AsyncDATABASE_URL,
+    pool_size=10,  # default is 5
+    max_overflow=20,
+)
+```
 
 ---
 

@@ -93,7 +93,8 @@ Grafana is included in the Docker Compose stack for visualization:
 
 - **Access:** `http://localhost:3001`
 - **Default credentials:** `admin` / `admin`
-- **Data source:** Add Prometheus at `http://prometheus:9090`
+- **Data source:** Pre-provisioned at `http://prometheus:9090` (no manual setup needed)
+- **Dashboard:** "Link Forge Overview" is auto-provisioned with key panels
 
 ### Suggested Dashboard Panels
 

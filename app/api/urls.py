@@ -1,16 +1,15 @@
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request, Response
 from sqlalchemy import select, or_, asc, desc
-from sqlalchemy.orm import Session
-from app.database.session import get_db
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.database.session import get_async_db
 from app.schemas.url import UrlCreateRequest, UrlResponse, UrlUpdateRequest
-from app.services.url_service import create_short_url
+from app.services.url_service import create_short_url_async
 from app.database.config import settings
 from app.models.user import User
 from app.models.url import Url
 from app.auth.dependencies import get_current_user
-from app.cache.redis_client import redis_client
-from app.middleware.rate_limit import limiter
+import app.cache.redis_client as redis_module
 
 router = APIRouter(prefix="/api/v1/urls", tags=["urls"])
 
@@ -27,10 +26,9 @@ def to_response(url_row) -> UrlResponse:
     )
 
 @router.post("", response_model=UrlResponse, status_code=status.HTTP_201_CREATED)
-@limiter.limit("10/minute")
-def create_url(request: Request, response: Response, payload: UrlCreateRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+async def create_url(request: Request, response: Response, payload: UrlCreateRequest, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_async_db)):
     try:
-        url_row = create_short_url(
+        url_row = await create_short_url_async(
             db,
             original_url=str(payload.original_url),
             user_id=str(current_user.id),
@@ -42,8 +40,9 @@ def create_url(request: Request, response: Response, payload: UrlCreateRequest, 
     return to_response(url_row)
 
 @router.patch("/{url_id}", response_model=UrlResponse)
-def update_url(url_id: uuid.UUID, payload: UrlUpdateRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    url_row = db.get(Url, url_id)
+async def update_url(url_id: uuid.UUID, payload: UrlUpdateRequest, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_async_db)):
+    result = await db.execute(select(Url).where(Url.id == url_id))
+    url_row = result.scalar_one_or_none()
     if url_row is None:
         raise HTTPException(status_code=404, detail="URL not found")
         
@@ -55,14 +54,15 @@ def update_url(url_id: uuid.UUID, payload: UrlUpdateRequest, current_user: User 
             value = str(value)
         setattr(url_row, field, value)
         
-    db.commit()
-    db.refresh(url_row)
-    redis_client.delete(f"url:{url_row.short_code}")
+    await db.commit()
+    await db.refresh(url_row)
+    await redis_module.async_redis_client.delete(f"url:{url_row.short_code}")
     return to_response(url_row)
 
 @router.delete("/{url_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_url(url_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    url_row = db.get(Url, url_id)
+async def delete_url(url_id: uuid.UUID, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_async_db)):
+    result = await db.execute(select(Url).where(Url.id == url_id))
+    url_row = result.scalar_one_or_none()
     if url_row is None:
         raise HTTPException(status_code=404, detail="URL not found")
         
@@ -70,17 +70,17 @@ def delete_url(url_id: uuid.UUID, current_user: User = Depends(get_current_user)
         raise HTTPException(status_code=403, detail="You do not own this URL")
         
     short_code = url_row.short_code
-    db.delete(url_row)
-    db.commit()
-    redis_client.delete(f"url:{short_code}")
+    await db.delete(url_row)
+    await db.commit()
+    await redis_module.async_redis_client.delete(f"url:{short_code}")
     return None
 
 ALLOWED_SORT_FIELDS = {"created_at", "click_count", "short_code"}
 
 @router.get("", response_model=list[UrlResponse])
-def list_my_urls(
+async def list_my_urls(
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_db),
     q: str | None = Query(None, description="Search original_url or short_code"),
     sort_by: str = Query("created_at", description="created_at | click_count | short_code"),
     order: str = Query("desc", pattern="^(asc|desc)$"),
@@ -100,5 +100,6 @@ def list_my_urls(
     
     stmt = stmt.offset((page - 1) * page_size).limit(page_size)
     
-    rows = db.scalars(stmt).all()
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
     return [to_response(r) for r in rows]

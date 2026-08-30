@@ -1,9 +1,9 @@
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
 from sqlalchemy import select, or_
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database.session import get_db
+from app.database.session import get_async_db
 from app.models.user import User
 from app.schemas.auth import RegisterRequest, LoginRequest, TokenResponse, RefreshRequest
 from app.auth.password import hash_password, verify_password
@@ -12,8 +12,9 @@ from app.auth.jwt import create_access_token, create_refresh_token, decode_token
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
-def register(payload: RegisterRequest, db: Session = Depends(get_db)):
-    existing = db.scalar(select(User).where(or_(User.email == payload.email, User.username == payload.username)))
+async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_async_db)):
+    result = await db.execute(select(User).where(or_(User.email == payload.email, User.username == payload.username)))
+    existing = result.scalar_one_or_none()
     if existing:
         if existing.email == payload.email:
             raise HTTPException(status_code=409, detail="Email already registered")
@@ -22,14 +23,15 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
         
     user = User(username=payload.username, email=payload.email, password_hash=hash_password(payload.password))
     db.add(user)
-    db.commit()
-    db.refresh(user)
+    await db.commit()
+    await db.refresh(user)
     
     return {"id": str(user.id), "username": user.username, "email": user.email}
 
 @router.post("/login", response_model=TokenResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
-    user = db.scalar(select(User).where(User.email == payload.email))
+async def login(payload: LoginRequest, db: AsyncSession = Depends(get_async_db)):
+    result = await db.execute(select(User).where(User.email == payload.email))
+    user = result.scalar_one_or_none()
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password")
         
@@ -39,7 +41,7 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     )
 
 @router.post("/refresh", response_model=TokenResponse)
-def refresh(payload: RefreshRequest):
+async def refresh(payload: RefreshRequest):
     try:
         claims = decode_token(payload.refresh_token)
     except jwt.PyJWTError:
