@@ -1,20 +1,23 @@
 
+import uuid
 from app.cache.flush_worker import flush_once
 from app.cache.redis_client import redis_client
 from app.database.session import engine
 
 
 def test_analytics_flow(client):
+    uid = uuid.uuid4().hex[:8]
+
     # 1. Register User 1
-    client.post("/api/v1/auth/register", json={"username": "user1", "email": "user1@test.com", "password": "password123"})
-    login_res1 = client.post("/api/v1/auth/login", json={"email": "user1@test.com", "password": "password123"})
+    client.post("/api/v1/auth/register", json={"username": f"user1_{uid}", "email": f"user1_{uid}@test.com", "password": "password123"})
+    login_res1 = client.post("/api/v1/auth/login", json={"email": f"user1_{uid}@test.com", "password": "password123"})
     assert login_res1.status_code == 200
     token1 = login_res1.json()["access_token"]
     headers1 = {"Authorization": f"Bearer {token1}"}
 
     # 2. Register User 2
-    client.post("/api/v1/auth/register", json={"username": "user2", "email": "user2@test.com", "password": "password123"})
-    login_res2 = client.post("/api/v1/auth/login", json={"email": "user2@test.com", "password": "password123"})
+    client.post("/api/v1/auth/register", json={"username": f"user2_{uid}", "email": f"user2_{uid}@test.com", "password": "password123"})
+    login_res2 = client.post("/api/v1/auth/login", json={"email": f"user2_{uid}@test.com", "password": "password123"})
     assert login_res2.status_code == 200
     token2 = login_res2.json()["access_token"]
     headers2 = {"Authorization": f"Bearer {token2}"}

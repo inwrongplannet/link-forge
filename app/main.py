@@ -1,5 +1,5 @@
+import asyncio
 import logging
-import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.api import analytics, auth, health, redirect, urls
-from app.cache.flush_worker import run_flush_worker
+from app.cache.flush_worker import run_flush_worker_async
 from app.database.bootstrap import initialize_database
 from app.middleware.error_handlers import register_exception_handlers
 from app.utils.logging import configure_logging
@@ -15,30 +15,35 @@ from app.utils.logging import configure_logging
 configure_logging()
 logger = logging.getLogger("linkforge")
 
-_flush_stop_event = threading.Event()
-_flush_thread: threading.Thread | None = None
+_flush_stop_event: asyncio.Event | None = None
+_flush_task: asyncio.Task | None = None
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    global _flush_thread
+    global _flush_stop_event, _flush_task
+
     initialize_database()
 
-    _flush_thread = threading.Thread(
-        target=run_flush_worker,
-        kwargs={"stop_event": _flush_stop_event},
-        daemon=True,
+    _flush_stop_event = asyncio.Event()
+    _flush_task = asyncio.create_task(
+        run_flush_worker_async(
+            stop_event=_flush_stop_event,
+        ),
         name="click-flush-worker",
     )
-    _flush_thread.start()
-    logger.info("Click flush worker thread started")
+    logger.info("Click flush worker task started")
 
     yield
 
-    _flush_stop_event.set()
-    if _flush_thread:
-        _flush_thread.join(timeout=15)
-    logger.info("Click flush worker thread stopped")
+    if _flush_stop_event:
+        _flush_stop_event.set()
+    if _flush_task:
+        try:
+            await asyncio.wait_for(_flush_task, timeout=15)
+        except asyncio.TimeoutError:
+            _flush_task.cancel()
+    logger.info("Click flush worker task stopped")
 
 
 def create_app() -> FastAPI:

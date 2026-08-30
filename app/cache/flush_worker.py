@@ -11,6 +11,7 @@ The ``flush_once()`` function is also used by tests to synchronously flush
 without waiting for the background cycle.
 """
 
+import asyncio
 import logging
 import threading
 import uuid
@@ -130,6 +131,42 @@ def run_flush_worker(
 
     while not stop_event.is_set():
         stop_event.wait(timeout=interval)
+        if stop_event.is_set():
+            break
+        try:
+            flushed = flush_once(r, engine)
+            flush_cycles.inc()
+            if flushed:
+                clicks_flushed.inc(flushed)
+                logger.info("Flushed %d click events to Postgres", flushed)
+        except Exception:
+            flush_errors.inc()
+            logger.exception("Unexpected error in flush worker")
+
+    logger.info("Click flush worker stopped")
+
+
+async def run_flush_worker_async(
+    interval: int = FLUSH_INTERVAL_SECONDS,
+    stop_event: asyncio.Event | None = None,
+) -> None:
+    """Async background loop that periodically flushes buffered clicks to Postgres.
+
+    Runs as an asyncio task in the event loop. Uses its own sync engine + sync Redis
+    for the actual batch operations (acceptable for background batch work).
+    """
+    r = redis.Redis.from_url(settings.redis_url, decode_responses=True)
+    engine = create_engine(settings.database_url, pool_pre_ping=True)
+    if stop_event is None:
+        stop_event = asyncio.Event()
+
+    logger.info("Click flush worker started (interval=%ds)", interval)
+
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            pass
         if stop_event.is_set():
             break
         try:

@@ -64,17 +64,25 @@ Provides a SQLAlchemy session wrapped in a **transaction that is rolled back** a
 4. Yields the session to the test
 5. Closes the session, rolls back the transaction, closes the connection
 
+### `get_async_db` override (autouse)
+
+Overrides the `get_async_db` FastAPI dependency to yield a sync-backed `AsyncSession` using the transactional `db_session` fixture. This allows async route handlers to run against the same rolled-back transaction as sync tests.
+
+### `reset_async_redis` (autouse)
+
+Clears all keys in the Redis test database between tests. Uses `async_redis_client.flushdb()` to ensure test isolation for Redis-dependent tests.
+
 ### `reset_rate_limit` (autouse)
 
 Disables the SlowAPI rate limiter for all tests (prevents `429` errors), re-enables after each test.
 
 ### `client`
 
-Returns a `TestClient` that uses the transactional `db_session` instead of the real database session. Overrides `get_db` dependency.
+Returns a `TestClient` that uses the transactional `db_session` instead of the real database session. Overrides `get_db` and `get_async_db` dependencies.
 
 ### `auth_headers_for_two_users`
 
-Registers and logs in two test users (`user_a`, `user_b`), returning their auth headers as a tuple. Useful for testing ownership/authorization logic.
+Registers and logs in two test users with **unique usernames** (generated via `uuid.uuid4().hex[:8]`), returning their auth headers as a tuple. Useful for testing ownership/authorization logic. Unique usernames prevent `409 Conflict` across test runs.
 
 ---
 

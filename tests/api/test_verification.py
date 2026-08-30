@@ -7,8 +7,9 @@ BASE_URL = "http://127.0.0.1:8000"
 API_URL = f"{BASE_URL}/api/v1"
 
 def test_flow(client):
+    uid = uuid.uuid4().hex[:8]
     print("\n--- 1. Register/login work and return valid JWTs ---")
-    user_a = f"usera_{uuid.uuid4().hex[:8]}"
+    user_a = f"usera_{uid}"
     pwd_a = "password123"
     
     r_reg = client.post("/api/v1/auth/register", json={"username": user_a, "email": f"{user_a}@test.com", "password": pwd_a})
@@ -33,9 +34,10 @@ def test_flow(client):
     print("Tampered token rejected with 401.")
     
     print("\n--- 3. A user cannot PATCH/DELETE another user's URL (403) ---")
-    res_reg_b = client.post("/api/v1/auth/register", json={"username": "user_b", "email": "b@test.com", "password": "password123"})
+    user_b = f"userb_{uid}"
+    res_reg_b = client.post("/api/v1/auth/register", json={"username": user_b, "email": f"{user_b}@test.com", "password": "password123"})
     assert res_reg_b.status_code == 201
-    res_log_b = client.post("/api/v1/auth/login", json={"email": "b@test.com", "password": "password123"})
+    res_log_b = client.post("/api/v1/auth/login", json={"email": f"{user_b}@test.com", "password": "password123"})
     access_token_b = res_log_b.json()["access_token"]
     
     r_create = client.post("/api/v1/urls", headers={"Authorization": f"Bearer {access_token_a}"}, json={"original_url": "https://url-a.com"})

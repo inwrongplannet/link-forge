@@ -64,6 +64,8 @@ Docker Compose starts the full stack: application, PostgreSQL, Redis, Prometheus
 docker compose up --build -d
 ```
 
+The application container runs `alembic upgrade head || alembic stamp head` to apply migrations before starting uvicorn with `--workers 4`. Each worker runs its own asyncio event loop with its own click flush worker task.
+
 ### Service Ports
 
 | Service | URL | Purpose |
@@ -102,7 +104,7 @@ The production `Dockerfile` uses `python:3.12-slim` and:
 3. Installs Python dependencies from `requirements.txt`
 4. Copies the project files
 5. Exposes port 8000
-6. Runs `uvicorn app.main:app --host 0.0.0.0 --port 8000`
+6. Runs `uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4`
 
 ### Build Standalone
 
@@ -198,6 +200,7 @@ Results are tracked in `loadtests/RESULTS.md`.
 
 ### Scaling
 
+- **Multi-worker:** Uvicorn runs with `--workers 4` by default. Adjust the `--workers` flag in `Dockerfile` or `docker-compose.yml` to match available CPU cores.
 - **Horizontal scaling:** The app is stateless — run multiple instances behind a load balancer
 - **Database connection pooling:** Consider PgBouncer for high-concurrency deployments
 - **Redis:** Use Redis Cluster or Sentinel for high availability

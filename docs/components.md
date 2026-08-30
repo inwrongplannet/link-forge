@@ -8,12 +8,12 @@ This document details every module and component in the Link Forge application.
 
 ### `dependencies.py` — FastAPI Auth Dependency
 
-Provides `get_current_user()`, a FastAPI `Depends` callable used to protect routes:
+Provides `get_current_user()`, an **async** FastAPI `Depends` callable used to protect routes:
 
 1. Extracts the Bearer token from the `Authorization` header via `HTTPBearer()`
 2. Decodes the JWT using `decode_token()`
 3. Validates the token type is `"access"` (rejects refresh tokens)
-4. Looks up the user by `claims["sub"]` (user UUID)
+4. Looks up the user by `claims["sub"]` (user UUID) using `get_async_db()` and `AsyncSession`
 5. Raises `401 Unauthorized` if the token is invalid/expired or the user no longer exists
 
 ### `jwt.py` — JWT Token Management
@@ -36,8 +36,11 @@ Provides `get_current_user()`, a FastAPI `Depends` callable used to protect rout
 
 ### `url_service.py` — URL Creation Logic
 
-**`create_short_url(db, original_url, user_id, custom_alias, expires_at)`**
+**`create_short_url(db, original_url, user_id, custom_alias, expires_at)`** — sync version for background tasks.
 
+**`create_short_url_async(db, original_url, user_id, custom_alias, expires_at)`** — async version for route handlers. Uses `AsyncSession` with `await db.execute()`.
+
+Both:
 1. Validates the URL format (must have `http` or `https` scheme and a netloc)
 2. Uses the `custom_alias` if provided, otherwise generates a random 7-char code
 3. Attempts to insert the URL row; on `IntegrityError` (duplicate short code):
@@ -76,7 +79,9 @@ Creates a `Click` row capturing:
 
 ### `redis_client.py`
 
-Singleton Redis client created from `settings.redis_url` with `decode_responses=True` (returns strings instead of bytes).
+Two Redis clients are provided as module-level singletons created from `settings.redis_url` with `decode_responses=True`:
+- **`redis_client`** — `redis.Redis` (sync), used by background flush worker and cache invalidation
+- **`async_redis_client`** — `redis.asyncio.Redis` (async), used by async route handlers for non-blocking I/O
 
 ### `click_buffer.py` — Redis-Buffered Click Recording
 
@@ -88,6 +93,10 @@ Buffers a click event in Redis using a pipeline:
 - `INCR clicks:count:{short_code}` — atomic click counter
 - `RPUSH clicks:events:{short_code}` — JSON-encoded event details (url_id, ip, browser, device, referrer, timestamp)
 - Returns `True` on success, `False` if Redis is unavailable (caller falls back to synchronous DB writes)
+
+**`buffer_click_async(short_code, url_id, ip_address, browser, device, referrer, clicked_at)`**
+
+Async wrapper that takes the module-level `async_redis_client` and calls the same pipeline logic with `await`.
 
 **`drain_click_buffer(r, short_code) -> (delta, events)`**
 
@@ -109,6 +118,10 @@ Runs a single flush cycle:
 **`run_flush_worker(r, engine, interval, stop_event)`**
 
 Background loop that runs `flush_once()` every `interval` seconds (default: 10s). Runs in a daemon thread started by the FastAPI lifespan. Uses `threading.Event` for graceful shutdown.
+
+**`run_flush_worker_async(r, engine, interval, stop_event)`**
+
+Async variant that runs `flush_once()` in an `asyncio` loop using `asyncio.sleep()` and `asyncio.Event`. Launched via `asyncio.create_task` in the app lifespan — runs as a background coroutine, not a thread.
 
 ### `metrics.py`
 

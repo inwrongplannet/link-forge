@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database.session import get_db
-from app.cache.redis_client import redis_client
+from app.database.session import get_async_db
+import app.cache.redis_client as redis_module
 
 router = APIRouter(tags=["health"])
 
@@ -16,19 +16,19 @@ import logging
 logger = logging.getLogger(__name__)
 
 @router.get("/ready")
-def ready(db: Session = Depends(get_db)):
+async def ready(db: AsyncSession = Depends(get_async_db)):
     checks = {"database": False, "redis": False}
     errors = {}
 
     try:
-        db.execute(text("SELECT 1"))
+        await db.execute(text("SELECT 1"))
         checks["database"] = True
     except Exception as e:
         logger.error("Database readiness check failed: %s", e)
         errors["database"] = str(e)
 
     try:
-        redis_client.ping()
+        await redis_module.async_redis_client.ping()
         checks["redis"] = True
     except Exception as e:
         logger.error("Redis readiness check failed: %s", e)

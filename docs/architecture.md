@@ -82,11 +82,13 @@ The app is created via a factory function `create_app()` in `app/main.py`. This:
 
 1. Creates a `FastAPI` instance with a `lifespan` context manager
 2. On startup, calls `initialize_database()` to run `Base.metadata.create_all()`
-3. Starts the click flush worker daemon thread
+3. Starts the click flush worker as an `asyncio.create_task` (not a thread)
 4. Instruments the app with Prometheus via `Instrumentator()`
 5. Includes all API routers (`health`, `urls`, `redirect`, `auth`, `analytics`)
 6. Registers global exception handlers for `SQLAlchemyError`, `RequestValidationError`, and `Exception`
 7. Configures SlowAPI rate limiting middleware
+
+Uvicorn runs with `--workers 4` in production, each worker running its own asyncio event loop with its own flush worker task.
 
 ## Directory Structure
 
@@ -109,15 +111,15 @@ link-forge/
 │   │   ├── jwt.py           # JWT create/decode
 │   │   └── password.py      # bcrypt hash/verify
 │   ├── cache/               # Redis caching + click buffering
-│   │   ├── click_buffer.py  # buffer_click() — Redis pipeline for click events
-│   │   ├── flush_worker.py  # Background batch flush to Postgres
+│   │   ├── click_buffer.py  # buffer_click(), buffer_click_async() — Redis pipeline
+│   │   ├── flush_worker.py  # Background batch flush (sync thread + async task)
 │   │   ├── metrics.py       # Prometheus cache + click-buffer counters
-│   │   └── redis_client.py  # Redis connection singleton
+│   │   └── redis_client.py  # Redis singleton (sync + async_redis_client)
 │   ├── core/                # Reserved for future core config
 │   ├── database/            # Database connection & config
 │   │   ├── bootstrap.py     # create_all tables on startup
 │   │   ├── config.py        # Settings (pydantic-settings)
-│   │   └── session.py       # Engine, SessionLocal, get_db()
+│   │   └── session.py       # Engine + AsyncEngine, SessionLocal + AsyncSessionLocal
 │   ├── middleware/           # Middleware & error handling
 │   │   ├── error_handlers.py# Global exception handlers
 │   │   └── rate_limit.py    # SlowAPI limiter instance
@@ -168,8 +170,10 @@ Click data is **buffered in Redis** on every redirect (cache hit or miss) via `b
 
 Unknown short codes are cached with a 60-second negative cache (`__miss__` sentinel) to prevent Postgres stampedes.
 
-### Synchronous Architecture with Background Flush
-The application uses **synchronous** SQLAlchemy sessions and route handlers. The redirect hot path touches only Redis (no DB interaction on cache hits). A daemon thread runs the click flush worker, which uses its own SQLAlchemy engine to batch-write buffered clicks to Postgres periodically.
+### Async Concurrency with Multi-Worker Scaling
+All route handlers are `async def` and use `redis.asyncio` for non-blocking Redis I/O. The redirect hot path touches only Redis (no DB interaction on cache hits). A background `asyncio` task runs the click flush worker, which drains buffered clicks to Postgres using its own sync SQLAlchemy engine. Uvicorn runs with `--workers 4` for multi-process scaling, with each worker sharing the same PostgreSQL and Redis backends.
+
+SQLAlchemy sessions are provided via `AsyncSession` backed by a greenlet-based async engine (wrapping psycopg3's sync driver). The sync `get_db()` dependency is retained for the flush worker and bootstrap code.
 
 ### Short Code Generation
 Short codes are generated using `secrets.token_urlsafe()` (cryptographically secure), truncated to 7 characters. On collision, the service retries up to 5 times with fresh codes.

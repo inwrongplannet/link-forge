@@ -11,6 +11,7 @@ import logging
 from datetime import datetime, timezone
 
 import redis
+import redis.asyncio as aioredis
 
 logger = logging.getLogger("linkforge.click_buffer")
 
@@ -53,6 +54,39 @@ def buffer_click(
         return False
 
 
+async def buffer_click_async(
+    r: aioredis.Redis,
+    short_code: str,
+    url_id: str,
+    ip_address: str | None,
+    browser: str,
+    device: str,
+    referrer: str | None,
+    clicked_at: datetime | None = None,
+) -> bool:
+    if clicked_at is None:
+        clicked_at = datetime.now(timezone.utc)
+
+    event = {
+        "url_id": url_id,
+        "ip_address": ip_address,
+        "browser": browser,
+        "device": device,
+        "referrer": referrer,
+        "clicked_at": clicked_at.isoformat(),
+    }
+
+    try:
+        pipe = r.pipeline()
+        pipe.incr(f"clicks:count:{short_code}")
+        pipe.rpush(f"clicks:events:{short_code}", json.dumps(event))
+        await pipe.execute()
+        return True
+    except aioredis.RedisError:
+        logger.exception("Failed to buffer click for %s", short_code)
+        return False
+
+
 def drain_click_buffer(
     r: redis.Redis, short_code: str
 ) -> tuple[int, list[dict]]:
@@ -79,5 +113,31 @@ def drain_click_buffer(
 
         return delta, events
     except redis.RedisError:
+        logger.exception("Failed to drain click buffer for %s", short_code)
+        return 0, []
+
+
+async def drain_click_buffer_async(
+    r: aioredis.Redis, short_code: str
+) -> tuple[int, list[dict]]:
+    count_key = f"clicks:count:{short_code}"
+    events_key = f"clicks:events:{short_code}"
+
+    try:
+        pipe = r.pipeline()
+        pipe.get(count_key)
+        pipe.delete(count_key)
+        pipe.lrange(events_key, 0, -1)
+        pipe.delete(events_key)
+        results = await pipe.execute()
+
+        raw_count = results[0]
+        delta = int(raw_count) if raw_count else 0
+
+        raw_events = results[2]
+        events = [json.loads(e) for e in raw_events] if raw_events else []
+
+        return delta, events
+    except aioredis.RedisError:
         logger.exception("Failed to drain click buffer for %s", short_code)
         return 0, []

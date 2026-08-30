@@ -1,6 +1,6 @@
 # API Routes
 
-All API routes are defined under `app/api/`. The application uses FastAPI's `APIRouter` to organize endpoints into logical groups.
+All API routes are defined under `app/api/`. The application uses FastAPI's `APIRouter` to organize endpoints into logical groups. All route handlers are `async def` and use `redis.asyncio` for non-blocking Redis I/O, with `AsyncSession` for database access.
 
 ## Base URLs
 
